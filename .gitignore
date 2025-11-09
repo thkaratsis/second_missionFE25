@@ -1,0 +1,26 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.env/
+.venv/
+env/
+venv/
+
+# --- VS Code ---
+.vscode/
+
+# --- Project data (camera frames, logs, large outputs) ---
+data/
+logs/
+recordings/
+*.mp4
+*.avi
+*.jpg
+*.png
+
+# --- Raspberry Pi / desktop noise ---
+.DS_Store
+Thumbs.db
