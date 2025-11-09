@@ -1,0 +1,25 @@
+Everyday workflow
+git status                 # what changed
+git add <file>             # stage a file
+git add .                  # stage everything
+git commit -m "message"    # save snapshot
+
+Branches
+git branch                 # list
+git switch -c feature/x    # new branch
+git switch main            # move to main
+
+Connect & sync with remote
+git remote add origin <URL>   # first time
+git push -u origin main       # first push
+git push                      # later pushes
+git pull                      # get latest
+
+Quick look/compare
+git log --oneline            # short history
+git diff                     # unstaged changes
+git diff --staged            # staged changes
+
+Undo (safe starters)
+git restore <file>           # discard local changes to a file
+git restore --staged <file>  # unstage
