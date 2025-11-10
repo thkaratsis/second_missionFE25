@@ -31,12 +31,12 @@ MOTOR_REV = 2
 SERVO_CHANNEL = 0
 
 CENTER_ANGLE = 90
-LEFT_NEAR  = 120
-RIGHT_NEAR = 60
+LEFT_NEAR  = 115
+RIGHT_NEAR = 65
 LEFT_FAR   = 110
 RIGHT_FAR  = 70
-SERVO_MIN  = 60
-SERVO_MAX  = 120
+SERVO_MIN  = 70
+SERVO_MAX  = 110
 STEP = 3
 FAST_SERVO_STEP = 8
 SERVO_UPDATE_DELAY = 0.015
@@ -107,6 +107,16 @@ UNPARK_PHASE1_TARGET_DEG = 45.0
 UNPARK_PHASE2_TARGET_DEG = 40.0
 UNPARK_EXTRA_LEFT_DEG    = 55.0
 
+SOFT_AVOID_MIN_AREA = 1200       # react even to small blobs; tune 400–1200
+SOFT_AVOID_SPEED    = 16        # forward but a bit slower than NORMAL_SPEED
+SOFT_AVOID_EXIT_FRAMES = 3      # frames with no box before exiting soft-avoid
+SOFT_AVOID_MAX_STEER = 0.85     # limit how extreme early steering can be (0..1)
+
+soft_avoid_active = False
+soft_avoid_color = None       # "Red" or "Green"
+soft_avoid_miss_frames = 0
+
+
 XSHUT_PINS = {
     "left":         board.D16,
     "right":        board.D25,
@@ -146,6 +156,22 @@ MAX_LINE_GAP = 10
 
 # Morph kernel to clean masks a bit (optional)
 KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+
+def compute_soft_avoid_angle(color, area):
+    """Immediate steering away on first sighting, scaled but capped."""
+    base = compute_servo_angle(color, area)  # your area → angle map
+    # Move partway towards the near limit right away (no waiting)
+    if color == "Red":
+        # steer left
+        target = int(round(CENTER_ANGLE + SOFT_AVOID_MAX_STEER * (LEFT_NEAR - CENTER_ANGLE)))
+    else:
+        # steer right
+        target = int(round(CENTER_ANGLE + SOFT_AVOID_MAX_STEER * (RIGHT_NEAR - CENTER_ANGLE)))
+    # Blend: if area small, stay closer to base; if big, push toward target
+    w = _area_closeness(area)  # 0..1 using your gamma
+    soft = int(round((1 - 0.5*w) * base + (0.5*w) * target))
+    return clamp(soft, SERVO_MIN, SERVO_MAX)
+
 
 def draw_boxes(frame_bgr, mask, bgr_color, label):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -548,6 +574,43 @@ try:
                 with yaw_lock: yaw = 0.0
                 set_motor_speed(MOTOR_FWD, MOTOR_REV, NORMAL_SPEED)
             continue
+
+        # ----- Immediate SOFT-AVOID (forward steer away as soon as a box is seen) -----
+        if not turn_active and not in_blue_backward and not avoidance_mode:
+            # Choose the biggest red/green box if any
+            candidate = None
+            if boxes:
+                boxes.sort(key=lambda b: b[1], reverse=True)  # by area
+                candidate = boxes[0]  # (color, area, (x1,y1,x2,y2))
+
+            if candidate and candidate[1] >= SOFT_AVOID_MIN_AREA:
+                # (Re)enter soft-avoid or keep it
+                if not soft_avoid_active:
+                    soft_avoid_active = True
+                    soft_avoid_color = candidate[0]
+                    soft_avoid_miss_frames = 0
+
+                # If color changed to the other side and is larger, switch sides
+                if soft_avoid_color != candidate[0]:
+                    soft_avoid_color = candidate[0]
+                    soft_avoid_miss_frames = 0
+
+                # Immediate away-steer + reduced forward speed
+                c_color, c_area, _ = candidate
+                target_angle = compute_soft_avoid_angle(c_color, c_area)
+                set_servo_angle(SERVO_CHANNEL, target_angle)
+                set_motor_speed(MOTOR_FWD, MOTOR_REV, SOFT_AVOID_SPEED)
+                # Do NOT continue here; allow the rest of the safety logic (intersection/hard reverse) below to run
+            else:
+                # No suitable box this frame
+                if soft_avoid_active:
+                    soft_avoid_miss_frames += 1
+                    if soft_avoid_miss_frames >= SOFT_AVOID_EXIT_FRAMES:
+                        # Exit soft-avoid → resume normal forward & IMU centering
+                        soft_avoid_active = False
+                        soft_avoid_color = None
+                        soft_avoid_miss_frames = 0
+
 
         # ----- Reverse-avoidance trigger -----
         if not avoidance_mode:
