@@ -116,6 +116,10 @@ soft_avoid_active = False
 soft_avoid_color = None       # "Red" or "Green"
 soft_avoid_miss_frames = 0
 
+PROX_MIN_SPEED      = 8        # slowest crawl speed (still forward)
+PROX_START_PIXELS   = 450      # start slowing when box bottom is within this many px above the car box
+DANGER_CAP_SPEED    = 14       # extra cap when danger_mode is True
+
 
 XSHUT_PINS = {
     "left":         board.D16,
@@ -156,6 +160,28 @@ MAX_LINE_GAP = 10
 
 # Morph kernel to clean masks a bit (optional)
 KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+
+def proximity_speed(area, bottom_y, img_h):
+    """
+    Return a forward speed based on how close a box is.
+    Uses both area closeness (0..1) and pixel proximity (0..1).
+    """
+    # Area closeness (you already have this mapping & gamma)
+    w_area = _area_closeness(area)  # 0..1
+
+    # Pixel proximity: how close the box bottom is to the car footprint
+    car_top = img_h - (CAR_BOX_BOTTOM_MARGIN + CAR_BOX_HEIGHT)
+    # When bottom_y is within PROX_START_PIXELS above car_top, we ramp 0..1
+    dy = max(0, (bottom_y - (car_top - PROX_START_PIXELS)))
+    w_pix = clamp(dy / float(PROX_START_PIXELS), 0.0, 1.0)
+
+    # Be conservative: take the stronger (max) of the two cues
+    w = max(w_area, w_pix)
+
+    # Map 0..1 → NORMAL_SPEED..PROX_MIN_SPEED
+    spd = NORMAL_SPEED - w * (NORMAL_SPEED - PROX_MIN_SPEED)
+    return int(round(clamp(spd, PROX_MIN_SPEED, NORMAL_SPEED)))
+
 
 def compute_soft_avoid_angle(color, area):
     """Immediate steering away on first sighting, scaled but capped."""
@@ -599,7 +625,10 @@ try:
                 c_color, c_area, _ = candidate
                 target_angle = compute_soft_avoid_angle(c_color, c_area)
                 set_servo_angle(SERVO_CHANNEL, target_angle)
-                set_motor_speed(MOTOR_FWD, MOTOR_REV, SOFT_AVOID_SPEED)
+                # Slow down more if it’s very close
+                prox_spd = proximity_speed(c_area, candidate[2][3], h)  # bottom_y = candidate[2][3]
+                cmd_spd = min(SOFT_AVOID_SPEED, prox_spd)
+                set_motor_speed(MOTOR_FWD, MOTOR_REV, cmd_spd)                
                 # Do NOT continue here; allow the rest of the safety logic (intersection/hard reverse) below to run
             else:
                 # No suitable box this frame
