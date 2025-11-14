@@ -1,4 +1,4 @@
-# ======= BOX AVOID + IMU (yours) + SHAPE-ONLY LINE TURN (LEFT/RIGHT BASED ON BLUE/ORANGE, 5s MIN TURN INTERVAL + STRONGER NO-BOX IMU) =======
+# ======= BOX AVOID + IMU (yours) + SHAPE-ONLY LINE TURN (LEFT/RIGHT BASED ON GLOBAL 'direction', BLUE or ORANGE, 5s MIN TURN INTERVAL + STRONGER NO-BOX IMU) =======
 
 import cv2
 import numpy as np
@@ -44,21 +44,21 @@ TOF_TURN_LEFT_MIN_CM = 80.0
 # New "stuck" escape thresholds
 FRONT_STUCK_CM = 7.0       # if front < 7cm and no boxes/line -> emergency reverse
 BACK_CLEAR_CM  = 10.0      # reverse until back >= 10cm
-EMERGENCY_BACK_SPEED = 18
+EMERGENCY_BACK_SPEED = 14
 EMERGENCY_TURN_DEG   = 60.0
 
 # ==== BLUE-BOX BACKWARD LOGIC ====
 blue_backward_start = None
 in_blue_backward = False
 BLUE_BACK_DURATION = 1.5
-BLUE_BACK_SPEED = 13
+BLUE_BACK_SPEED = 10
 
 # ==== AVOIDANCE LOGIC ====
 AVOID_BACK_DURATION = 1.0
-AVOID_SPEED = 16
+AVOID_SPEED = 13
 
 # ==== NORMAL LINE FOLLOWING SPEED ====
-NORMAL_SPEED  = 17
+NORMAL_SPEED  = 12
 
 # ==== LINE TURN (shape-only, diagonal band) ====
 TURN_LEFT_SERVO = 60
@@ -77,11 +77,13 @@ LINE_ORIENT_MAX_DEG = 65
 LINE_MASK_THICKNESS = 8
 
 # --- Turn-related constants (now all used) ---
-LINE_CENTER_Y_MIN = 350          # minimal y (downwards) for line-center to qualify
+LINE_CENTER_Y_MIN       = 350   # legacy, kept
+LINE_CENTER_BLUE_Y_MIN  = 350   # minimal y (downwards) for BLUE line-center to qualify
+LINE_CENTER_ORANGE_Y_MIN = 350  # minimal y (downwards) for ORANGE line-center to qualify
 TURN_RIGHT_SERVO = 120           # hard right steering angle
 TURN_MIN_YAW_DEG = 75.0          # minimum yaw before we ALLOW stopping (and only if a box seen)
 TURN_FAILSAFE_MAX_DEG = 90.0     # hard stop if yaw exceeds this even without box
-TURN_MOTOR_SPEED = 22            # motor speed during turning
+TURN_MOTOR_SPEED = 13            # motor speed during turning
 
 YAW_RESET_AFTER_LEFT  = 0.0      # yaw value after a left turn
 YAW_RESET_AFTER_RIGHT = 0.0      # yaw value after a right turn
@@ -97,7 +99,7 @@ GREEN_LO = np.array([70, 145, 70], dtype=np.uint8)
 GREEN_HI = np.array([80, 200, 160], dtype=np.uint8)
 ORANGE_LO = np.array([6,  170, 170], dtype=np.uint8)
 ORANGE_HI = np.array([14, 210, 205], dtype=np.uint8)
-BLUE_LO   = np.array([112,  150, 110], dtype=np.uint8)
+BLUE_LO   = np.array([110,  100, 110], dtype=np.uint8)
 BLUE_HI   = np.array([120, 211, 150], dtype=np.uint8)
 
 # dynamic turn/trigger tuning for yaw target estimate (kept)
@@ -111,6 +113,10 @@ settle_until_ts = 0.0
 
 # --- post-reverse follow window ---
 POST_BACK_FOLLOW_S = 0.7  # seconds to keep steering toward the box after the reverse
+
+# --- stronger IMU influence near boxes (Option 1 but IMU-only) ---
+BOX_YAW_GAIN_MIN = 2.0    # minimum yaw gain when box is barely detected
+BOX_YAW_GAIN_MAX = 3.5    # max yaw gain when box very close
 
 # ==== IMU SETUP ====
 MPU6050_ADDR = 0x68
@@ -668,18 +674,23 @@ try:
                 continue
         # --------- END: EMERGENCY STUCK ESCAPE ----------
 
-        # ----- TURN decision (which side & trigger conditions) -----
-        # Decide direction based on which line is lower in the image and below LINE_CENTER_Y_MIN
+        # ----- TURN decision (BLUE OR ORANGE, turn side from parking 'direction') -----
         Turn = "No"
-        if orange_y > blue_y and orange_y >= LINE_CENTER_Y_MIN and orange_len_max >= BLUE_MIN_LEN_PX:
-            Turn = "Right"
-        elif blue_y > orange_y and blue_y >= LINE_CENTER_Y_MIN and blue_len_max >= BLUE_MIN_LEN_PX:
-            Turn = "Left"
 
-        color_trigger = (Turn in ("Left", "Right"))
+        blue_trigger = (blue_y  >= LINE_CENTER_BLUE_Y_MIN   and blue_len_max   >= BLUE_MIN_LEN_PX)
+        orange_trigger = (orange_y >= LINE_CENTER_ORANGE_Y_MIN and orange_len_max >= BLUE_MIN_LEN_PX)
 
-        if line_seen and color_trigger and TURN_FRONT_MIN_CM <= f_cm <= TURN_FRONT_MAX_CM:
-            blue_gate_streak += 1   # reuse same streak counter
+        line_trigger = blue_trigger or orange_trigger
+
+        if line_trigger:
+            # use initial parking direction ONLY for deciding left/right
+            if direction == "left":
+                Turn = "Left"
+            else:
+                Turn = "Right"
+
+        if line_trigger and TURN_FRONT_MIN_CM <= f_cm <= TURN_FRONT_MAX_CM:
+            blue_gate_streak += 1
         else:
             blue_gate_streak = 0
 
@@ -689,11 +700,16 @@ try:
             (not in_blue_backward) and (not turn_active)
         )
 
-        tof_line_turn_gate = (f_cm < TOF_TURN_FRONT_MAX_CM) and (l_cm > TOF_TURN_LEFT_MIN_CM) and line_seen
+        # ToF gate so we DON'T start the turn when already at the wall
+        tof_line_turn_gate = (TURN_FRONT_MIN_CM <= f_cm <= TURN_FRONT_MAX_CM)
 
-        # Choose which line y-position to use (whichever is closer / lower in the image)
-        valid_ys = [y for y in (blue_y, orange_y) if y >= 0]
-        line_y_for_turn = max(valid_ys) if valid_ys else blue_y
+        # choose which line y-position to use (whichever of blue/orange is lower in the image)
+        valid_ys = []
+        if blue_trigger and blue_y >= 0:
+            valid_ys.append(blue_y)
+        if orange_trigger and orange_y >= 0:
+            valid_ys.append(orange_y)
+        line_y_for_turn = max(valid_ys) if valid_ys else (blue_y if blue_y >= 0 else orange_y)
 
         now_ts = time.time()
 
@@ -707,12 +723,12 @@ try:
             and ok_to_turn
             and tof_line_turn_gate):
 
-            # start a turn (direction decided by Turn)
+            # start a turn
             turn_active = True
             turn_dir = Turn
             box_seen_while_turning = False
 
-            # compute dynamic yaw target (kept even if FSM uses TURN_MIN_YAW_DEG / FAILSAFE)
+            # dynamic yaw target (kept for reference)
             y0 = int(0.65 * h_img)
             yr = max(1, int(0.35 * h_img))
             t_dyn = (line_y_for_turn - y0) / float(yr)
@@ -734,17 +750,14 @@ try:
             set_servo_angle(SERVO_CHANNEL, target_angle)
             set_motor_speed(MOTOR_FWD, MOTOR_REV, TURN_MOTOR_SPEED)
 
-            # if any red/green box seen while turning, mark it
+            # if any red/green box seen while turning, mark it (kept but not used for stop)
             if red_seen or green_seen:
                 box_seen_while_turning = True
 
-            # stop rules:
-            # 1) we've seen a box during the turn AND yaw >= TURN_MIN_YAW_DEG
-            stop_for_box = box_seen_while_turning and (abs(current_yaw) >= TURN_MIN_YAW_DEG)
-            # 2) failsafe: ALWAYS stop if yaw beyond failsafe limit (~90°)
+            # stop rule: full ~90° yaw rotation (failsafe only)
             failsafe_yaw = abs(current_yaw) >= TURN_FAILSAFE_MAX_DEG
 
-            if stop_for_box or failsafe_yaw:
+            if failsafe_yaw:
                 # straighten wheels
                 set_servo_angle(SERVO_CHANNEL, CENTER_ANGLE)
 
@@ -769,7 +782,7 @@ try:
                 if first_turn_gate_active:
                     first_turn_gate_active = False
 
-                # IMPORTANT: if we're turning, skip the rest of your normal logic this frame
+                # skip the rest of your normal logic this frame
                 continue
 
         # ==== BLUE-BACKWARD LOGIC (immediate if intersect) ====
@@ -853,6 +866,7 @@ try:
                 target_angle = imu_center_servo(current_yaw, YAW_DEADBAND_DEG_BASE, YAW_KP_BASE, SERVO_CORR_LIMIT_BASE)
                 if not any(boxes_intersect(car_box, b[2]) for b in boxes):
                     avoidance_mode = False
+                    avoid_direction = None
                     state = "normal"
                     with yaw_lock:
                         yaw = 0.0
@@ -871,6 +885,8 @@ try:
                     SERVO_CORR_LIMIT_STRONG
                 )
 
+                l_cm = tof_cm(sensors["left"])
+                r_cm = tof_cm(sensors["right"])
                 l = l_cm
                 r = r_cm
                 if l < SIDE_COLLIDE_CM and r >= SIDE_COLLIDE_CM:
@@ -903,21 +919,18 @@ try:
                     last_color = chosen_color
 
                 if frame_count >= COLOR_HOLD_FRAMES:
-                    if chosen_color == "Red":
-                        color_angle = LEFT_NEAR
-                        target_angle = max(75, min(105, color_angle + int(current_yaw * 2)))
-                    elif chosen_color == "Green":
-                        color_angle = RIGHT_NEAR
-                        target_angle = max(75, min(105, color_angle - int(current_yaw * 2)))
-                    else:
-                        target_angle = max(75, min(105, compute_servo_angle(chosen_color, chosen_area)))
-
-                    # --- AREA-ONLY scaling (far -> less turn, near -> more turn), keeps your yaw effect ---
+                    # --- AREA-ONLY scaling (far -> less turn, near -> more turn) + IMU yaw term ---
                     area_angle = compute_servo_angle(chosen_color, chosen_area)
+
+                    # compute IMU yaw gain based ONLY on box area (Option 1 but IMU-only)
+                    norm_area = max(MIN_AREA, min(MAX_AREA, chosen_area))
+                    closeness = (norm_area - MIN_AREA) / (MAX_AREA - MIN_AREA + 1e-6)
+                    yaw_gain = BOX_YAW_GAIN_MIN + closeness * (BOX_YAW_GAIN_MAX - BOX_YAW_GAIN_MIN)
+
                     if chosen_color == "Red":
-                        target_angle = max(60, min(130, int(area_angle + int(current_yaw * 2))))
+                        target_angle = max(60, min(130, int(area_angle + int(current_yaw * yaw_gain))))
                     elif chosen_color == "Green":
-                        target_angle = max(60, min(130, int(area_angle - int(current_yaw * 2))))
+                        target_angle = max(60, min(130, int(area_angle - int(current_yaw * yaw_gain))))
                     else:
                         target_angle = max(75, min(105, area_angle))
 
