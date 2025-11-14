@@ -14,7 +14,7 @@ def mouse_callback(event, x, y, flags, param):
     if event == cv2.EVENT_LBUTTONDOWN and frame is not None:
         bgr = frame[y, x]
         hsv = cv2.cvtColor(np.uint8([[bgr]]), cv2.COLOR_BGR2HSV)[0][0]
-        print(f"Clicked at ({x},{y}) | BGR: {bgr} | HSV: {hsv}")
+        print(f"Clicked at ({x},{y}) HSV: {hsv}")
 
 cv2.namedWindow("Live Feed")
 cv2.setMouseCallback("Live Feed", mouse_callback)

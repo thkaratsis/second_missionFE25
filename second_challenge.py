@@ -1,4 +1,4 @@
-# ======= BOX AVOID + IMU (yours) + SHAPE-ONLY LINE TURN (ALWAYS LEFT, FIXED + 5s MIN TURN INTERVAL + STRONGER NO-BOX IMU) =======
+# ======= BOX AVOID + IMU (yours) + SHAPE-ONLY LINE TURN (LEFT/RIGHT BASED ON BLUE/ORANGE, 5s MIN TURN INTERVAL + STRONGER NO-BOX IMU) =======
 
 import cv2
 import numpy as np
@@ -65,6 +65,7 @@ TURN_LEFT_SERVO = 60
 TURN_IMU_TARGET_DEG = 75.0
 TURN_COOLDOWN_S = 0.7
 TURN_MIN_INTERVAL_S = 5.0
+TURN_COMPLETE_DEG = 90.0   # original note, we also have yaw-based stop below
 CANNY_LO, CANNY_HI = 60, 160
 BLUR_KSIZE = 5
 HOUGH_THRESHOLD = 60
@@ -75,27 +76,35 @@ LINE_ORIENT_MIN_DEG = 25
 LINE_ORIENT_MAX_DEG = 65
 LINE_MASK_THICKNESS = 8
 
-# ==== COLOR HSV RANGES (calibrated) ====
-RED1_LO   = np.array([0,   140, 120], dtype=np.uint8)
-RED1_HI   = np.array([5,   255, 190], dtype=np.uint8)
-RED2_LO   = np.array([0,   140, 120], dtype=np.uint8)
-RED2_HI   = np.array([5,   255, 190], dtype=np.uint8)
+# --- Turn-related constants (now all used) ---
+LINE_CENTER_Y_MIN = 350          # minimal y (downwards) for line-center to qualify
+TURN_RIGHT_SERVO = 120           # hard right steering angle
+TURN_MIN_YAW_DEG = 75.0          # minimum yaw before we ALLOW stopping (and only if a box seen)
+TURN_FAILSAFE_MAX_DEG = 90.0     # hard stop if yaw exceeds this even without box
+TURN_MOTOR_SPEED = 22            # motor speed during turning
 
-GREEN_LO  = np.array([65,   90,  90], dtype=np.uint8)
-GREEN_HI  = np.array([80,  255, 150], dtype=np.uint8)
+YAW_RESET_AFTER_LEFT  = 0.0      # yaw value after a left turn
+YAW_RESET_AFTER_RIGHT = 0.0      # yaw value after a right turn
 
-ORANGE_LO = np.array([6,  140, 180], dtype=np.uint8)
-ORANGE_HI = np.array([14, 200, 210], dtype=np.uint8)
+TURN_COOLDOWN_SEC = 5.0          # 5s no-repeat cooldown between turns
 
-BLUE_LO   = np.array([112, 140, 120], dtype=np.uint8)
-BLUE_HI   = np.array([118, 230, 160], dtype=np.uint8)
+# HSV thresholds (tweak for venue lighting)
+RED1_LO = np.array([0,   230, 140], dtype=np.uint8)
+RED1_HI = np.array([5,  255, 200], dtype=np.uint8)
+RED2_LO = np.array([16, 230, 140], dtype=np.uint8)
+RED2_HI = np.array([18, 255, 200], dtype=np.uint8)
+GREEN_LO = np.array([70, 145, 70], dtype=np.uint8)
+GREEN_HI = np.array([80, 200, 160], dtype=np.uint8)
+ORANGE_LO = np.array([6,  170, 170], dtype=np.uint8)
+ORANGE_HI = np.array([14, 210, 205], dtype=np.uint8)
+BLUE_LO   = np.array([112,  150, 110], dtype=np.uint8)
+BLUE_HI   = np.array([120, 211, 150], dtype=np.uint8)
 
-
-# dynamic turn/trigger tuning
+# dynamic turn/trigger tuning for yaw target estimate (kept)
 BLUE_Y_TRIGGER_FRAC = 0.78
 BLUE_MIN_LEN_PX = 70
-TURN_YAW_MIN_DEG = 55.0
-TURN_YAW_MAX_DEG = 95.0
+TURN_YAW_MIN_DEG = 80.0
+TURN_YAW_MAX_DEG = 90.0
 
 SETTLE_DURATION = 0.0
 settle_until_ts = 0.0
@@ -198,16 +207,20 @@ picam2.start()
 # ==== ToF SETUP ====
 i2c = busio.I2C(board.SCL, board.SDA)
 xshut_pins = {
-    "left": board.D16,
-    "right": board.D25,
-    "front": board.D26,
-    "back": board.D24
+    "left":    board.D16,
+    "right":   board.D25,
+    "front":   board.D26,
+    "back":    board.D8,
+    "front_l": board.D7,
+    "front_r": board.D24
 }
 addresses = {
-    "left": 0x30,
-    "right": 0x31,
-    "front": 0x32,
-    "back": 0x33
+    "left":    0x30,
+    "right":   0x31,
+    "front":   0x32,
+    "back":    0x33,
+    "front_l": 0x34,
+    "front_r": 0x35
 }
 
 xshuts = {}
@@ -219,7 +232,7 @@ for name, pin in xshut_pins.items():
 time.sleep(0.1)
 
 sensors = {}
-for name in ["left", "right", "front", "back"]:
+for name in ["left", "right", "front", "back", "front_l", "front_r"]:
     xshuts[name].value = True
     time.sleep(0.05)
     s = adafruit_vl53l0x.VL53L0X(i2c)
@@ -322,6 +335,20 @@ def detect_line_and_mask(edges, h, w):
                 cv2.line(line_mask, (x1,y1), (x2,y2), 255, LINE_MASK_THICKNESS)
     return (seg is not None), seg, line_mask
 
+def y_at_center(lines, center_x):
+    if lines is None:
+        return -1
+    ys = []
+    for x1,y1,x2,y2 in lines[:,0]:
+        if x1 != x2:
+            m = (y2 - y1) / float(x2 - x1)
+            y = m * (center_x - x1) + y1
+            ys.append(y)
+        else:
+            if x1 == center_x:
+                ys.append(max(y1, y2))
+    return max(ys) if ys else -1
+
 # ===============================
 # SMART UNPARK (two-phase; faster; left-case phase 2 = 65° + extra ~60° left if direction == "left")
 # ===============================
@@ -413,6 +440,9 @@ state_start = time.time()
 line_seen_streak = 0
 last_turn_end_time = -1.0
 turn_active = False
+turn_dir = None
+box_seen_while_turning = False
+next_turn_allowed_time = 0.0
 straight_lock_time = 0.0
 
 # track if a box was seen during the current turn
@@ -491,13 +521,32 @@ try:
             line_seen_streak = 0
             line_seen = False
 
-        ORANGE_H_LO, ORANGE_H_HI = 10, 32
-        ORANGE_S_MIN, ORANGE_V_MIN = 80, 110
-        mask_orange = cv2.inRange(
-            imgHSV,
-            np.array([ORANGE_H_LO, ORANGE_S_MIN, ORANGE_V_MIN], dtype=np.uint8),
-            np.array([ORANGE_H_HI, 255, 255], dtype=np.uint8),
+        # ====== COLOR & LINE MASKS (using global HSV thresholds) ======
+
+        # ORANGE & BLUE for line detection (Hough)
+        mask_orange = cv2.inRange(imgHSV, ORANGE_LO, ORANGE_HI)
+        edges_orange = cv2.Canny(mask_orange, 50, 150)
+
+        mask_blue = cv2.inRange(imgHSV, BLUE_LO, BLUE_HI)
+        edges_blue = cv2.Canny(mask_blue, 50, 150)
+
+        lines_orange = cv2.HoughLinesP(
+            edges_orange, 1, np.pi / 180,
+            threshold=50, minLineLength=50, maxLineGap=10
         )
+        lines_blue = cv2.HoughLinesP(
+            edges_blue, 1, np.pi / 180,
+            threshold=50, minLineLength=50, maxLineGap=10
+        )
+
+        blue_len_max   = max_line_len(lines_blue)
+        orange_len_max = max_line_len(lines_orange)
+
+        img_lines = img.copy()
+
+        center_x = img.shape[1] // 2
+        orange_y = y_at_center(lines_orange, center_x)
+        blue_y   = y_at_center(lines_blue, center_x)
 
         # PINK (exclude from red)
         mask_pink = cv2.inRange(
@@ -506,54 +555,19 @@ try:
             np.array([170, 255, 255], dtype=np.uint8),
         )
 
-        mask_red1 = cv2.inRange(imgHSV, np.array([0,100,80]),   np.array([10,255,200]))
-        mask_red2 = cv2.inRange(imgHSV, np.array([0,100,80]), np.array([10,255,200]))  
-
-        orange_lower = np.array([0, 110, 200])
-        orange_upper = np.array([20, 160, 255])
-        mask_orange = cv2.inRange(imgHSV, orange_lower, orange_upper)
-        edges_orange = cv2.Canny(mask_orange, 50, 150)
-        blue_lower = np.array([100, 110, 100])
-        blue_upper = np.array([120, 220, 150])
-        mask_blue = cv2.inRange(imgHSV, blue_lower, blue_upper)
-        edges_blue = cv2.Canny(mask_blue, 50, 150)
-        lines_orange = cv2.HoughLinesP(edges_orange, 1, np.pi / 180, threshold=50, minLineLength=50, maxLineGap=10)
-        lines_blue = cv2.HoughLinesP(edges_blue, 1, np.pi / 180, threshold=50, minLineLength=50, maxLineGap=10)
-        blue_len_max = max_line_len(lines_blue)
-        img_lines = img.copy()
-
-        center_x = img.shape[1] // 2
-
-        def y_at_center(lines):
-            if lines is None:
-                return -1
-            y_values = []
-            for x1, y1, x2, y2 in lines[:, 0]:
-                if x1 != x2:  # avoid vertical divide-by-zero
-                    slope = (y2 - y1) / (x2 - x1)
-                    y = slope * (center_x - x1) + y1
-                    y_values.append(y)
-                else:
-                    # vertical line, take min/max depending on which side of center
-                    if x1 == center_x:
-                        y_values.append(max(y1, y2))
-            return max(y_values) if y_values else -1
-
-        orange_y = y_at_center(lines_orange)
-        blue_y = y_at_center(lines_blue)
-
-        # Blue mask
-        blue_lower = np.array([100, 60, 80])
-        blue_upper = np.array([120, 120, 170])
-        mask_blue = cv2.inRange(imgHSV, blue_lower, blue_upper)
-  
+        # RED using global thresholds
+        mask_red1 = cv2.inRange(imgHSV, RED1_LO, RED1_HI)
+        mask_red2 = cv2.inRange(imgHSV, RED2_LO, RED2_HI)
         mask_red  = cv2.bitwise_or(mask_red1, mask_red2)
+
+        # Remove orange and pink from red
         mask_red  = cv2.bitwise_and(mask_red, cv2.bitwise_not(mask_orange))
         mask_red  = cv2.bitwise_and(mask_red, cv2.bitwise_not(mask_pink))
         if line_mask is not None:
             mask_red = cv2.bitwise_and(mask_red, cv2.bitwise_not(line_mask))
 
-        mask_green = cv2.inRange(imgHSV, np.array([35,60,60]), np.array([95,255,255]))
+        # GREEN using global thresholds
+        mask_green = cv2.inRange(imgHSV, GREEN_LO, GREEN_HI)
         if line_mask is not None:
             mask_green = cv2.bitwise_and(mask_green, cv2.bitwise_not(line_mask))
 
@@ -584,6 +598,9 @@ try:
             cv2.rectangle(img_contours, top_left, bottom_right, (0,255,0), 2)
             cv2.putText(img_contours, f"Green {int(area)}", (top_left[0], max(20, top_left[1]-6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
+
+        red_seen = red_data is not None
+        green_seen = green_data is not None
 
         # mark that we saw a box during the active turn
         if turn_active and len(boxes) > 0:
@@ -651,33 +668,109 @@ try:
                 continue
         # --------- END: EMERGENCY STUCK ESCAPE ----------
 
-        # confirm corner-turn timing (stable, right moment)
-        if line_seen and blue_y >= blue_y_trig and TURN_FRONT_MIN_CM <= f_cm <= TURN_FRONT_MAX_CM and blue_len_max >= BLUE_MIN_LEN_PX:
-            blue_gate_streak += 1
+        # ----- TURN decision (which side & trigger conditions) -----
+        # Decide direction based on which line is lower in the image and below LINE_CENTER_Y_MIN
+        Turn = "No"
+        if orange_y > blue_y and orange_y >= LINE_CENTER_Y_MIN and orange_len_max >= BLUE_MIN_LEN_PX:
+            Turn = "Right"
+        elif blue_y > orange_y and blue_y >= LINE_CENTER_Y_MIN and blue_len_max >= BLUE_MIN_LEN_PX:
+            Turn = "Left"
+
+        color_trigger = (Turn in ("Left", "Right"))
+
+        if line_seen and color_trigger and TURN_FRONT_MIN_CM <= f_cm <= TURN_FRONT_MAX_CM:
+            blue_gate_streak += 1   # reuse same streak counter
         else:
             blue_gate_streak = 0
+
         ok_to_turn = (
             blue_gate_streak >= LINE_DETECT_CONSEC_FRAMES and
             out_of_cooldown and out_of_min_interval and
             (not in_blue_backward) and (not turn_active)
         )
+
         tof_line_turn_gate = (f_cm < TOF_TURN_FRONT_MAX_CM) and (l_cm > TOF_TURN_LEFT_MIN_CM) and line_seen
 
-        if blue_y >= blue_y_trig and not avoidance_mode and not emergency_mode:
-            #(not avoidance_mode) and (not in_blue_backward) and (not turn_active) and (not emergency_mode) and line_seen and out_of_min_interval and allow_first_turn and tof_gate_ok:
-            if ok_to_turn and tof_line_turn_gate:
-                turn_active = True
-                # dynamic yaw target based on how far down the line is
-                y0 = int(0.65 * h_img)
-                yr = max(1, int(0.35 * h_img))
-                t_dyn = (blue_y - y0) / float(yr)
-                if t_dyn < 0: t_dyn = 0.0
-                if t_dyn > 1: t_dyn = 1.0
-                turn_target_deg_active = TURN_YAW_MIN_DEG + t_dyn * (TURN_YAW_MAX_DEG - TURN_YAW_MIN_DEG)
-                with yaw_lock:
-                    yaw = 0.0
-                set_servo_angle(SERVO_CHANNEL, TURN_LEFT_SERVO)
-                set_motor_speed(MOTOR_FWD, MOTOR_REV, NORMAL_SPEED)
+        # Choose which line y-position to use (whichever is closer / lower in the image)
+        valid_ys = [y for y in (blue_y, orange_y) if y >= 0]
+        line_y_for_turn = max(valid_ys) if valid_ys else blue_y
+
+        now_ts = time.time()
+
+        # ----- TURN state machine (yaw-based, no time.sleep) -----
+        if (Turn in ("Left", "Right")
+            and not turn_active
+            and not in_blue_backward
+            and not avoidance_mode
+            and not emergency_mode
+            and now_ts >= next_turn_allowed_time
+            and ok_to_turn
+            and tof_line_turn_gate):
+
+            # start a turn (direction decided by Turn)
+            turn_active = True
+            turn_dir = Turn
+            box_seen_while_turning = False
+
+            # compute dynamic yaw target (kept even if FSM uses TURN_MIN_YAW_DEG / FAILSAFE)
+            y0 = int(0.65 * h_img)
+            yr = max(1, int(0.35 * h_img))
+            t_dyn = (line_y_for_turn - y0) / float(yr)
+            if t_dyn < 0: t_dyn = 0.0
+            if t_dyn > 1: t_dyn = 1.0
+            turn_target_deg_active = TURN_YAW_MIN_DEG + t_dyn * (TURN_YAW_MAX_DEG - TURN_YAW_MIN_DEG)
+
+            with yaw_lock:
+                yaw = 0.0      # reset yaw at turn start
+            last_time = now_ts
+
+        if turn_active:
+            # steer hard according to direction and drive forward
+            if turn_dir == "Left":
+                target_angle = TURN_LEFT_SERVO
+            else:
+                target_angle = TURN_RIGHT_SERVO
+
+            set_servo_angle(SERVO_CHANNEL, target_angle)
+            set_motor_speed(MOTOR_FWD, MOTOR_REV, TURN_MOTOR_SPEED)
+
+            # if any red/green box seen while turning, mark it
+            if red_seen or green_seen:
+                box_seen_while_turning = True
+
+            # stop rules:
+            # 1) we've seen a box during the turn AND yaw >= TURN_MIN_YAW_DEG
+            stop_for_box = box_seen_while_turning and (abs(current_yaw) >= TURN_MIN_YAW_DEG)
+            # 2) failsafe: ALWAYS stop if yaw beyond failsafe limit (~90°)
+            failsafe_yaw = abs(current_yaw) >= TURN_FAILSAFE_MAX_DEG
+
+            if stop_for_box or failsafe_yaw:
+                # straighten wheels
+                set_servo_angle(SERVO_CHANNEL, CENTER_ANGLE)
+
+                # set yaw to a defined offset after turn
+                if turn_dir == "Left":
+                    with yaw_lock:
+                        yaw = YAW_RESET_AFTER_LEFT
+                else:
+                    with yaw_lock:
+                        yaw = YAW_RESET_AFTER_RIGHT
+
+                current_servo_angle = CENTER_ANGLE
+                turn_active = False
+                turn_dir = None
+                box_seen_while_turning = False
+
+                # cooldown: no new turn for TURN_COOLDOWN_SEC
+                next_turn_allowed_time = time.time() + TURN_COOLDOWN_SEC
+                last_turn_end_time = time.time()
+                settle_until_ts = time.time() + SETTLE_DURATION
+
+                if first_turn_gate_active:
+                    first_turn_gate_active = False
+
+                # IMPORTANT: if we're turning, skip the rest of your normal logic this frame
+                continue
 
         # ==== BLUE-BACKWARD LOGIC (immediate if intersect) ====
         if not in_blue_backward and not turn_active and not emergency_mode:
@@ -764,21 +857,6 @@ try:
                     with yaw_lock:
                         yaw = 0.0
                     settle_until_ts = time.time() + SETTLE_DURATION
-
-        # Finish the turn when yaw target reached
-        if turn_active:
-            target_angle = TURN_LEFT_SERVO
-            if (abs(current_yaw) >= TURN_IMU_TARGET_DEG) or (turn_target_deg_active is not None and abs(current_yaw) >= turn_target_deg_active) or (abs(current_yaw) >= 50.0 and turn_box_seen):
-                set_servo_angle(SERVO_CHANNEL, CENTER_ANGLE)
-                set_motor_speed(MOTOR_FWD, MOTOR_REV, NORMAL_SPEED)
-                with yaw_lock:
-                    yaw = -15.0
-                turn_active = False
-                turn_target_deg_active = None
-                last_turn_end_time = time.time()
-                settle_until_ts = time.time() + SETTLE_DURATION
-                if first_turn_gate_active:
-                    first_turn_gate_active = False
 
         # ==== NORMAL FORWARD + IMU STRAIGHTENING =====
         if not avoidance_mode and not in_blue_backward and not turn_active and state == "normal" and not emergency_mode:
@@ -881,10 +959,10 @@ try:
         if lines_blue is not None:
             for x1, y1, x2, y2 in lines_blue[:, 0]:
                 cv2.line(img_lines, (x1, y1), (x2, y2), (0, 165, 255), 2)
-            if cv2.waitKey(1) in [27, ord('q')]:
-                break
-        
-       # cv2.imshow('Lines', img_lines)
+        if cv2.waitKey(1) in [27, ord('q')]:
+            break
+
+    # cv2.imshow('Lines', img_lines)
 
 finally:
     picam2.stop()

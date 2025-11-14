@@ -12,16 +12,17 @@ CAM_SIZE = (640, 480)   # (W, H)
 MIN_AREA = 2000         # ignore tiny blobs
 
 # HSV thresholds (tweak for venue lighting)
+# HSV thresholds (tweak for venue lighting)
 RED1_LO = np.array([0,   230, 140], dtype=np.uint8)
-RED1_HI = np.array([5,  255, 160], dtype=np.uint8)
-RED2_LO = np.array([0, 230, 140], dtype=np.uint8)
-RED2_HI = np.array([5, 255, 160], dtype=np.uint8)
-GREEN_LO = np.array([75, 185, 75], dtype=np.uint8)
-GREEN_HI = np.array([80, 200, 95], dtype=np.uint8)
-ORANGE_LO = np.array([6,  180, 180], dtype=np.uint8)
-ORANGE_HI = np.array([14, 200, 200], dtype=np.uint8)
-BLUE_LO   = np.array([112,  150, 125], dtype=np.uint8)
-BLUE_HI   = np.array([118, 190, 140], dtype=np.uint8)
+RED1_HI = np.array([5,  255, 200], dtype=np.uint8)
+RED2_LO = np.array([16, 230, 140], dtype=np.uint8)
+RED2_HI = np.array([18, 255, 200], dtype=np.uint8)
+GREEN_LO = np.array([70, 145, 70], dtype=np.uint8)
+GREEN_HI = np.array([80, 200, 160], dtype=np.uint8)
+ORANGE_LO = np.array([6,  170, 170], dtype=np.uint8)
+ORANGE_HI = np.array([14, 210, 205], dtype=np.uint8)
+BLUE_LO   = np.array([112,  150, 110], dtype=np.uint8)
+BLUE_HI   = np.array([120, 211, 150], dtype=np.uint8)
 
 # Hough params for lines
 HOUGH_THRESH = 50
