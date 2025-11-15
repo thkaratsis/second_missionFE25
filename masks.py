@@ -13,16 +13,16 @@ MIN_AREA = 2000         # ignore tiny blobs
 
 # HSV thresholds (tweak for venue lighting)
 # HSV thresholds (tweak for venue lighting)
-RED1_LO = np.array([0,   230, 140], dtype=np.uint8)
-RED1_HI = np.array([5,  255, 200], dtype=np.uint8)
-RED2_LO = np.array([16, 230, 140], dtype=np.uint8)
-RED2_HI = np.array([18, 255, 200], dtype=np.uint8)
-GREEN_LO = np.array([70, 145, 70], dtype=np.uint8)
-GREEN_HI = np.array([80, 200, 160], dtype=np.uint8)
-ORANGE_LO = np.array([6,  170, 170], dtype=np.uint8)
-ORANGE_HI = np.array([14, 210, 205], dtype=np.uint8)
-BLUE_LO   = np.array([112,  150, 110], dtype=np.uint8)
-BLUE_HI   = np.array([120, 211, 150], dtype=np.uint8)
+RED1_LO    = np.array([0,   120, 110], dtype=np.uint8)  # Red lower hue range 1
+RED1_HI    = np.array([5,  255, 255], dtype=np.uint8)  # Red upper hue range 1
+RED2_LO    = np.array([0, 120, 110], dtype=np.uint8)  # Red lower hue range 2
+RED2_HI    = np.array([5, 255, 255], dtype=np.uint8)  # Red upper hue range 2
+GREEN_LO   = np.array([70, 145, 70],  dtype=np.uint8)   # Green lower HSV bound
+GREEN_HI   = np.array([80, 200, 160], dtype=np.uint8)   # Green upper HSV bound
+ORANGE_LO  = np.array([6,  170, 170], dtype=np.uint8)   # Orange lower HSV bound
+ORANGE_HI  = np.array([14, 210, 205], dtype=np.uint8)   # Orange upper HSV bound
+BLUE_LO    = np.array([110, 100, 110], dtype=np.uint8)  # Blue lower HSV bound
+BLUE_HI    = np.array([120, 211, 150], dtype=np.uint8)  # Blue upper HSV bound
 
 # Hough params for lines
 HOUGH_THRESH = 50

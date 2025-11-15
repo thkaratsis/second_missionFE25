@@ -1,5 +1,12 @@
-# ======= BOX AVOID + IMU (yours) + SHAPE-ONLY LINE TURN (LEFT/RIGHT BASED ON GLOBAL 'direction', BLUE or ORANGE, 5s MIN TURN INTERVAL + STRONGER NO-BOX IMU) =======
+# 2nd mission
+# v1.1: add state print, add turn/lap count and stop after 3 laps, variables cleanun
+#       add ultrasonic for side checks during cruise
 
+
+
+# =========================
+# IMPORTS
+# =========================
 import cv2
 import numpy as np
 from picamera2 import Picamera2
@@ -7,118 +14,168 @@ import time
 from pca9685_control import set_servo_angle, set_motor_speed
 import smbus2
 import threading
-
-# ToF deps
 import board
 import busio
 import digitalio
 import adafruit_vl53l0x
-from gpiozero import Button
+from gpiozero import Device, Button, DistanceSensor
+from gpiozero.pins.lgpio import LGPIOFactory   # Uses /dev/gpiochip*
+Device.pin_factory = LGPIOFactory()
 
-# ==== CONSTANTS ====
-MOTOR_FWD = 1
-MOTOR_REV = 2
-SERVO_CHANNEL = 0
-CENTER_ANGLE = 90
-LEFT_FAR = 110
-LEFT_NEAR = 125
-RIGHT_FAR = 70
-RIGHT_NEAR = 55
-new_servo_angle = 90
 
-STEP = 6
-FAST_SERVO_STEP = 9
-SERVO_UPDATE_DELAY = 0.00
+# =========================
+# CONFIGURABLE PARAMETERS
+# =========================
 
-MIN_AREA = 2000
-MAX_AREA = 20000
-COLOR_HOLD_FRAMES = 5
+# ---- Speed settings ----
+NORMAL_SPEED          = 14   # Base forward cruising speed during normal driving
+AVOID_SPEED           = 14   # Reverse speed when doing obstacle-avoidance backup
+TURN_MOTOR_SPEED      = 16   # Motor speed while performing a 90° line-based turn
+EMERGENCY_BACK_SPEED  = 18   # Reverse speed in emergency “stuck” escape
+BLUE_BACK_SPEED       = 12   # Reverse speed when box triggers blue-backward escape
+UNPARK_STRAIGHT_SPEED = 19   # Speed used during smart unpark phases
+STOP_SPEED            = 0    # Zero-speed (motors off)
 
-# ToF thresholds
-SIDE_COLLIDE_CM = 30.0
-TURN_SIDE_REQ_CM = 40.0
-TURN_FRONT_REQ_CM = 60.0
-TOF_TURN_FRONT_MAX_CM = 80.0
-TOF_TURN_LEFT_MIN_CM = 80.0
+# ---- Motor / servo basics ----
+MOTOR_FWD       = 1         # PCA9685 motor channel for forward direction
+MOTOR_REV       = 2         # PCA9685 motor channel for reverse direction
+SERVO_CHANNEL   = 0         # PCA9685 channel used by steering servo
+CENTER_ANGLE    = 90        # Servo angle for going straight
+LEFT_FAR        = 110       # Steering angle for a far red box (mild left)
+LEFT_NEAR       = 125       # Steering angle for a near red box (strong left)
+RIGHT_FAR       = 70        # Steering angle for a far green box (mild right)
+RIGHT_NEAR      = 55        # Steering angle for a near green box (strong right)
+new_servo_angle = 90        # Helper variable used in blue-backward servo updates
+LEFT_COLLIDE_ANGLE = 120    # Steering angle on left side collision correctio
+RIGHT_COLLIDE_ANGLE = 60    # Steering angle on right side collision correctio
 
-# New "stuck" escape thresholds
-FRONT_STUCK_CM = 7.0       # if front < 7cm and no boxes/line -> emergency reverse
-BACK_CLEAR_CM  = 10.0      # reverse until back >= 10cm
-EMERGENCY_BACK_SPEED = 18
-EMERGENCY_TURN_DEG   = 60.0
+# ---- Obstacle detection (vision) ----
+MIN_AREA          = 2000    # Minimum contour area to accept as a box
+MAX_AREA          = 20000   # Area at which box is considered "very close"
+COLOR_HOLD_FRAMES = 5       # Frames the same color must persist to be “locked”
 
-# ==== BLUE-BOX BACKWARD LOGIC ====
-blue_backward_start = None
-in_blue_backward = False
-BLUE_BACK_DURATION = 0.7
-BLUE_BACK_SPEED = 12
+# ---- ToF thresholds (general) ----
+SIDE_COLLIDE_CM       = 30.0  # If side < this, we steer away to avoid collision
+TURN_SIDE_REQ_CM      = 40.0  # (legacy) side distance needed to allow turn
+TURN_FRONT_REQ_CM     = 60.0  # (legacy) front distance needed to allow turn
+TOF_TURN_FRONT_MAX_CM = 80.0  # Max front distance at which line-turn is valid
+TOF_TURN_LEFT_MIN_CM  = 80.0  # (legacy) min left distance for some turn logic
 
-# ==== AVOIDANCE LOGIC ====
-AVOID_BACK_DURATION = 0.7
-AVOID_SPEED = 14
+# ---- Stuck / emergency escape thresholds ----
+FRONT_STUCK_CM    = 7.0    # If front ToF < this and no boxes/line -> emergency reverse
+BACK_CLEAR_CM     = 10.0   # Reverse until back ToF >= this
+EMERGENCY_TURN_DEG = 60.0  # Degrees to turn during emergency escape after reversing
 
-# ==== NORMAL LINE FOLLOWING SPEED ====
-NORMAL_SPEED  = 14
+# ---- Blue-backward escape (box very close to front) ----
+BLUE_BACK_DURATION = 0.7   # How long to reverse in blue-backward mode (seconds)
 
-# ==== LINE TURN (shape-only, diagonal band) ====
-TURN_LEFT_SERVO = 60
-TURN_IMU_TARGET_DEG = 75.0
-TURN_COOLDOWN_S = 0.7
-TURN_MIN_INTERVAL_S = 5.0
-TURN_COMPLETE_DEG = 90.0   # original note, we also have yaw-based stop below
-CANNY_LO, CANNY_HI = 60, 160
-BLUR_KSIZE = 5
-HOUGH_THRESHOLD = 60
-HOUGH_MIN_LENGTH = 120
-HOUGH_MAX_GAP = 20
-LINE_DETECT_CONSEC_FRAMES = 2
-LINE_ORIENT_MIN_DEG = 25
-LINE_ORIENT_MAX_DEG = 65
-LINE_MASK_THICKNESS = 9
+# ---- Obstacle avoidance (non-blue-backward) ----
+AVOID_BACK_DURATION = 0.7  # Reverse duration in normal avoidance (seconds)
 
-# --- Turn-related constants (now all used) ---
-LINE_CENTER_Y_MIN       = 400   # legacy, kept
-LINE_CENTER_BLUE_Y_MIN  = 450   # minimal y (downwards) for BLUE line-center to qualify
-LINE_CENTER_ORANGE_Y_MIN = 500  # minimal y (downwards) for ORANGE line-center to qualify
-TURN_RIGHT_SERVO = 120           # hard right steering angle
-TURN_MIN_YAW_DEG = 75.0          # minimum yaw before we ALLOW stopping (and only if a box seen)
-TURN_FAILSAFE_MAX_DEG = 80.0     # hard stop if yaw exceeds this even without box
-TURN_MOTOR_SPEED = 16        # motor speed during turning
+# ---- Line-turn (shape / Hough based) ----
+TURN_LEFT_SERVO       = 60    # Servo angle for a hard left line-turn
+TURN_IMU_TARGET_DEG   = 75.0  # (legacy) target yaw for IMU-based turn completion
+TURN_COOLDOWN_S       = 0.7   # Minimal cooldown after a line detection
+TURN_MIN_INTERVAL_S   = 5.0   # Minimum time between two turns
+TURN_COMPLETE_DEG     = 90.0  # (legacy) yaw angle for considering turn complete
+CANNY_LO, CANNY_HI    = 60, 160  # Canny edge thresholds for line band pre-processing
+BLUR_KSIZE            = 5     # Gaussian blur kernel size for edge preprocessing
+HOUGH_THRESHOLD       = 60    # HoughLinesP threshold
+HOUGH_MIN_LENGTH      = 120   # Min line length to accept from HoughLinesP
+HOUGH_MAX_GAP         = 20    # Max allowed gap in HoughLinesP segments
+LINE_DETECT_CONSEC_FRAMES = 2 # Frames of consistent line detection to confirm
+LINE_ORIENT_MIN_DEG   = 25    # Minimum angle (deg) to accept a line as “diagonal”
+LINE_ORIENT_MAX_DEG   = 65    # Maximum angle (deg) to accept a line as “diagonal”
+LINE_MASK_THICKNESS   = 9     # Thickness of mask drawn over detected line band
 
-YAW_RESET_AFTER_LEFT  = -10.0      # yaw value after a left turn
-YAW_RESET_AFTER_RIGHT = 10.0      # yaw value after a right turn
+# ---- Turn-related constants ----
+LINE_CENTER_Y_MIN          = 800  # (legacy) minimal Y for generic line center
+LINE_CENTER_BLUE_Y_MIN     = 900  # Minimal Y for blue line to be valid for turn
+LINE_CENTER_ORANGE_Y_MIN   = 1000  # Minimal Y for orange line to be valid for turn
+TURN_RIGHT_SERVO           = 120  # Servo angle for a hard right line-turn
+TURN_MIN_YAW_DEG           = 75.0 # Min yaw before we allow stopping a turn (if used)
+TURN_FAILSAFE_MAX_DEG      = 80.0 # Failsafe yaw to stop turn even without box
 
-TURN_COOLDOWN_SEC = 6.0          # 5s no-repeat cooldown between turns
+YAW_RESET_AFTER_LEFT  = -10.0     # Yaw offset after finishing a left turn
+YAW_RESET_AFTER_RIGHT = 10.0      # Yaw offset after finishing a right turn
+
+TURN_COOLDOWN_SEC = 6.0           # Cooldown after each completed turn (no new turns)
 
 # HSV thresholds (tweak for venue lighting)
-RED1_LO = np.array([0,   120, 110], dtype=np.uint8)
-RED1_HI = np.array([10, 255, 255], dtype=np.uint8)
-RED2_LO = np.array([170, 120, 110], dtype=np.uint8)
-RED2_HI = np.array([179, 255, 255], dtype=np.uint8)
-GREEN_LO = np.array([70, 145, 70], dtype=np.uint8)
-GREEN_HI = np.array([80, 200, 160], dtype=np.uint8)
-ORANGE_LO = np.array([6,  170, 170], dtype=np.uint8)
-ORANGE_HI = np.array([14, 210, 205], dtype=np.uint8)
-BLUE_LO   = np.array([110,  100, 110], dtype=np.uint8)
-BLUE_HI   = np.array([120, 211, 150], dtype=np.uint8)
+RED1_LO    = np.array([0,   120, 110], dtype=np.uint8)  # Red lower hue range 1
+RED1_HI    = np.array([5,  255, 255], dtype=np.uint8)  # Red upper hue range 1
+RED2_LO    = np.array([0, 120, 110], dtype=np.uint8)  # Red lower hue range 2
+RED2_HI    = np.array([5, 255, 255], dtype=np.uint8)  # Red upper hue range 2
+GREEN_LO   = np.array([70, 145, 70],  dtype=np.uint8)   # Green lower HSV bound
+GREEN_HI   = np.array([80, 200, 160], dtype=np.uint8)   # Green upper HSV bound
+ORANGE_LO  = np.array([6,  170, 170], dtype=np.uint8)   # Orange lower HSV bound
+ORANGE_HI  = np.array([14, 210, 205], dtype=np.uint8)   # Orange upper HSV bound
+BLUE_LO    = np.array([110, 100, 110], dtype=np.uint8)  # Blue lower HSV bound
+BLUE_HI    = np.array([120, 211, 150], dtype=np.uint8)  # Blue upper HSV bound
 
-# dynamic turn/trigger tuning for yaw target estimate (kept)
-BLUE_Y_TRIGGER_FRAC = 0.78
-BLUE_MIN_LEN_PX = 70
-TURN_YAW_MIN_DEG = 80.0
-TURN_YAW_MAX_DEG = 90.0
+# ---- Dynamic yaw / line trigger tuning ----
+BLUE_Y_TRIGGER_FRAC = 0.78  # Fraction of image height for blue line trigger Y
+BLUE_MIN_LEN_PX     = 70    # Minimal Hough line length (blue/orange) to trigger turn
+TURN_YAW_MIN_DEG    = 80.0  # Minimum yaw target for dynamic line-turn yaw
+TURN_YAW_MAX_DEG    = 90.0  # Maximum yaw target for dynamic line-turn yaw
 
-SETTLE_DURATION = 0.0
-settle_until_ts = 0.0
+# ---- Post-reverse / settling behavior ----
+SETTLE_DURATION      = 0.0  # Seconds to force CENTER_ANGLE after certain events
+settle_until_ts      = 0.0  # Timestamp until which settle is active
+POST_BACK_FOLLOW_S   = 0.7  # Time to bias steering toward box after blue-backward
 
-# --- post-reverse follow window ---
-POST_BACK_FOLLOW_S = 0.7  # seconds to keep steering toward the box after the reverse
+# ---- Extra IMU gain near boxes ----
+BOX_YAW_GAIN_MIN = 1.5  # Minimum yaw gain when box just appears
+BOX_YAW_GAIN_MAX = 3.0  # Maximum yaw gain when box very close
 
-# --- stronger IMU influence near boxes (Option 1 but IMU-only) ---
-BOX_YAW_GAIN_MIN = 1.5    # minimum yaw gain when box is barely detected
-BOX_YAW_GAIN_MAX = 3.0    # max yaw gain when box very close
+# ---- Drift control ----
+DRIFT_GZ_THRESH       = 0.8   # Max |Gz| to consider for drift/bias update
+BIAS_ALPHA            = 0.002 # Smoothing factor for gyro bias update
+STRAIGHT_SERVO_WINDOW = 8     # Servo must be within this of CENTER to update bias
+DRIFT_DECAY_RATE      = 0.20  # Yaw decay factor when re-centering
 
-# ==== IMU SETUP ====
+# ---- Stability gates ----
+YAW_CLAMP_DEG     = 120.0 # Limit |yaw| to avoid runaway integration
+SIDE_CLEAR_CM     = 40.0  # Both side distances > this -> path considered clear
+SIDE_BALANCE_CM   = 8.0   # Max difference between left/right to consider balanced
+CALM_GZ_THRESH    = 0.35  # |Gz| threshold for applying strong yaw decay
+HARD_DECAY_RATE   = 2.0   # Strong yaw decay factor when sides are clear & calm
+SOFT_DECAY_RATE   = 0.6   # Softer yaw decay factor used during bias update
+CENTER_LOCK_WINDOW = 4    # Servo must be this close to CENTER for hard decay
+
+# ---- Post-turn grace periods (avoid instant re-trigger) ----
+POST_TURN_GRACE_GREEN_S = 5.00  # Ignore green box triggers for this long after turn
+POST_TURN_GRACE_RED_S   = 0.15  # Ignore red box triggers for this long after turn
+
+# ---- IMU keep-straight gains ----
+YAW_KP_BASE             = 1.2  # Base proportional gain for yaw correction
+SERVO_CORR_LIMIT_BASE   = 25   # Max correction (deg) from base yaw controller
+YAW_DEADBAND_DEG_BASE   = 4.0  # Deadband for base yaw correction (small error ignored)
+YAW_DEADBAND_DEG_STRONG = 6.0  # Deadband when using stronger yaw correction
+YAW_KP_STRONG           = 1.3  # Stronger proportional gain when no boxes
+SERVO_CORR_LIMIT_STRONG = 24   # Max correction (deg) for strong yaw controller
+
+# ---- Smart Unpark configuration ----
+UNPARK_CENTER_ANGLE     = CENTER_ANGLE # Servo angle for going straight during unpark
+UNPARK_LEFT_TURN_ANGLE  = 55           # Initial unpark steering angle if turning left
+UNPARK_RIGHT_TURN_ANGLE = 120          # Initial unpark steering angle if turning right
+
+# ---- Turn / lap counting ----
+TURNS_PER_LAP = 4   # Number of line-based turns per lap
+TOTAL_LAPS    = 3   # Number of laps to complete
+TOTAL_TURNS   = TURNS_PER_LAP * TOTAL_LAPS  # Convenience (total planned turns)
+
+# ---- Line / ToF gates for turning ----
+TURN_FRONT_MIN_CM = 18.0   # Min front distance to allow starting a line-based turn
+TURN_FRONT_MAX_CM = 140.0  # Max front distance to allow starting a line-based turn
+FIRST_TURN_FRONT_THRESH_CM = 70.0  # Extra gate for the very first turn
+
+
+# =========================
+# HARDWARE SETUP
+# =========================
+
+# ---- IMU SETUP ----
 MPU6050_ADDR = 0x68
 PWR_MGMT_1 = 0x6B
 GYRO_ZOUT_H = 0x47
@@ -148,26 +205,8 @@ print("Measuring gyro bias, keep sensor still...")
 gyro_z_bias = get_gyro_z_bias()
 print(f"Gyro Z bias: {gyro_z_bias:.3f} deg/s")
 
-# adaptive drift control
-DRIFT_GZ_THRESH = 0.8
-BIAS_ALPHA = 0.002
-STRAIGHT_SERVO_WINDOW = 8
-DRIFT_DECAY_RATE = 0.20
 
-# --- stability gates ---
-YAW_CLAMP_DEG = 120.0
-SIDE_CLEAR_CM = 40.0
-SIDE_BALANCE_CM = 8.0
-CALM_GZ_THRESH = 0.35
-HARD_DECAY_RATE = 2.0
-SOFT_DECAY_RATE = 0.6
-CENTER_LOCK_WINDOW = 4
-
-# --- post-turn avoidance grace (color-specific) ---
-POST_TURN_GRACE_GREEN_S = 5.00
-POST_TURN_GRACE_RED_S   = 0.15
-
-# ==== YAW TRACKING ====
+# ---- YAW TRACKING -----
 yaw = 0.0
 yaw_lock = threading.Lock()
 last_time = time.time()
@@ -182,14 +221,6 @@ def reset_yaw_listener():
 
 threading.Thread(target=reset_yaw_listener, daemon=True).start()
 
-# ---- IMU keep-straight (proportional) ----
-YAW_KP_BASE           = 1.2     # from 0.8 → 1.2
-SERVO_CORR_LIMIT_BASE = 25      # from 20 → 25
-YAW_DEADBAND_DEG_BASE = 2.0     # from 3.0 → 2.0 (starts correcting earlier)
-YAW_DEADBAND_DEG_BASE = 4.0
-YAW_DEADBAND_DEG_STRONG = 6.0
-YAW_KP_STRONG = 1.3
-SERVO_CORR_LIMIT_STRONG = 24
 
 def imu_center_servo(current_yaw_deg: float, deadband: float, kp: float, limit: float) -> int:
     if abs(current_yaw_deg) <= deadband:
@@ -198,7 +229,7 @@ def imu_center_servo(current_yaw_deg: float, deadband: float, kp: float, limit: 
     corr = max(-limit, min(limit, corr))
     return int(CENTER_ANGLE + corr)
 
-# ==== SERVO SETUP ====
+# ----- SERVO SETUP -----
 set_servo_angle(SERVO_CHANNEL, CENTER_ANGLE)
 current_servo_angle = CENTER_ANGLE
 
@@ -206,12 +237,13 @@ current_servo_angle = CENTER_ANGLE
 SERVO_SMOOTH_ALPHA = 0.35
 SERVO_MIN_DELTA_DEG = 2.0
 
-# ==== CAMERA SETUP ====
+# ---- CAMERA SETUP ----
 picam2 = Picamera2()
-picam2.configure(picam2.create_preview_configuration(main={"size": (1280, 720), "fps": 60})) #(main={"size": (640, 480)}))
+picam2.configure(picam2.create_preview_configuration(main={"size": (1280, 720)})) #(main={"size": (640, 480)}))
+picam2.set_controls({"FrameRate": 60})
 picam2.start()
 
-# ==== ToF SETUP ====
+# ---- ToF SETUP ----
 i2c = busio.I2C(board.SCL, board.SDA)
 xshut_pins = {
     "left":    board.D16,
@@ -257,7 +289,58 @@ def tof_cm(sensor):
     except:
         return 999
 
+
+# ---- Ultrasonic setup ----
+# ==== ULTRASONIC PINS (FRONT, LEFT, RIGHT) ====
+TRIG_FRONT, ECHO_FRONT = 22, 23  # GPIO pins for front sensor
+TRIG_LEFT,  ECHO_LEFT  = 27, 17  # GPIO pins for left sensor
+TRIG_RIGHT, ECHO_RIGHT = 5,  6   # GPIO pins for right sensor
+
+# ==== ULTRASONIC SENSORS (gpiozero DistanceSensor) ====
+front_ultra = DistanceSensor(echo=ECHO_FRONT, trigger=TRIG_FRONT, max_distance=2.4, queue_len=3)
+left_ultra  = DistanceSensor(echo=ECHO_LEFT,  trigger=TRIG_LEFT,  max_distance=1.2, queue_len=3)
+right_ultra = DistanceSensor(echo=ECHO_RIGHT, trigger=TRIG_RIGHT, max_distance=1.2, queue_len=3)
+
+def ultra_cm(sensor, max_cm=200.0):
+    """
+    Read a gpiozero DistanceSensor and return distance in cm.
+    Returns 999 on invalid / out-of-range.
+    """
+    d_m = sensor.distance  # in meters, between 0 and max_distance
+    if d_m is None:
+        return 999
+    d_cm = d_m * 100.0
+    if d_cm <= 0 or d_cm > max_cm:
+        return 999
+    return d_cm
+
+def get_front_ultra_cm():
+    return ultra_cm(front_ultra)
+
+def get_left_ultra_cm():
+    return ultra_cm(left_ultra)
+
+def get_right_ultra_cm():
+    return ultra_cm(right_ultra)
+
+
+
 # ==== HELPERS ====
+
+# ==== STATE PRINTING ====
+run_state = None
+
+def set_run_state(new_state: str):
+    """
+    Print state changes only when the label actually changes.
+    """
+    global run_state
+    if new_state != run_state:
+        run_state = new_state
+        print(f"[STATE] {new_state}", flush=True)
+
+
+
 def get_largest_contour(mask, min_area=500):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -361,10 +444,6 @@ def y_at_center(lines, center_x):
 # ===============================
 start_button = Button(20)
 
-UNPARK_CENTER_ANGLE = CENTER_ANGLE
-UNPARK_LEFT_TURN_ANGLE = 55
-UNPARK_RIGHT_TURN_ANGLE = 120
-UNPARK_STRAIGHT_SPEED = 19
 
 print("\n=== SMART UNPARK START ===")
 start_button.wait_for_press()
@@ -436,6 +515,7 @@ set_motor_speed(MOTOR_FWD, MOTOR_REV, UNPARK_STRAIGHT_SPEED)
 with yaw_lock:
     yaw = 0.0
 print("[DONE] Unpark sequence complete. Entering vision/avoid loop...")
+set_run_state("cruise")
 
 # ==== STATE VARIABLES ====
 last_color = None
@@ -462,11 +542,8 @@ post_back_follow_until = 0.0
 
 # turn confirmation state
 blue_gate_streak = 0
-TURN_FRONT_MIN_CM = 18.0
-TURN_FRONT_MAX_CM = 140.0
 
 # first-turn gate remains
-FIRST_TURN_FRONT_THRESH_CM = 70.0
 first_turn_gate_active = True
 
 # NEW: emergency stuck escape state
@@ -474,8 +551,16 @@ emergency_mode = False
 emergency_phase = None  # "reverse" -> "turn"
 emergency_direction = None  # "left" or "right"
 
+blue_backward_start = None
+in_blue_backward = False
+
 lines_blue = 0
 lines_orange = 0
+
+# ==== LAP & TURN COUNTERS ====
+turn_count = 0   # total turns completed
+lap_count = 1    # current lap (1-based)
+
 
 try:
     motors_started = True
@@ -487,7 +572,7 @@ try:
     current_servo_angle = CENTER_ANGLE
     last_update_time = time.time()
 
-    set_motor_speed(MOTOR_FWD, MOTOR_REV, 0)
+    set_motor_speed(MOTOR_FWD, MOTOR_REV, STOP_SPEED)
     time.sleep(0.2)
 
     while True:
@@ -634,6 +719,12 @@ try:
         r_cm = tof_cm(sensors["right"])
         b_cm = tof_cm(sensors["back"])
 
+        # Ultrasonic distances (front / left / right) in cm
+        f_ultra = get_front_ultra_cm()
+        l_ultra = get_left_ultra_cm()
+        r_ultra = get_right_ultra_cm()
+
+
         #if (not emergency_mode) and (not turn_active) and (not in_blue_backward) and (not avoidance_mode):
         #    no_boxes = (len(boxes) == 0)
         #    no_line  = (not line_seen)
@@ -650,7 +741,8 @@ try:
                 b_cm = tof_cm(sensors["back"])
                 if b_cm >= BACK_CLEAR_CM:
                     emergency_phase = "turn"
-                    emergency_direction = "left" if l_cm >= r_cm else "right"
+                    #emergency_direction = "left" if l_cm >= r_cm else "right"
+                    emergency_direction = "left" if l_ultra >= r_ultra else "right"
                     with yaw_lock:
                         yaw = 0.0
                     last_time = time.time()
@@ -690,7 +782,7 @@ try:
             else:
                 Turn = "Right"
 
-        if line_trigger and TURN_FRONT_MIN_CM <= f_cm <= TURN_FRONT_MAX_CM:
+        if line_trigger and TURN_FRONT_MIN_CM <= f_ultra <= TURN_FRONT_MAX_CM:
             blue_gate_streak += 1
         else:
             blue_gate_streak = 0
@@ -702,8 +794,9 @@ try:
         )
 
         # ToF gate so we DON'T start the turn when already at the wall
-        tof_line_turn_gate = (TURN_FRONT_MIN_CM <= f_cm <= TURN_FRONT_MAX_CM)
-
+        #tof_line_turn_gate = (TURN_FRONT_MIN_CM <= f_cm <= TURN_FRONT_MAX_CM)
+        tof_line_turn_gate = (TURN_FRONT_MIN_CM <= f_ultra <= TURN_FRONT_MAX_CM)
+       
         # choose which line y-position to use (whichever of blue/orange is lower in the image)
         valid_ys = []
         if blue_trigger and blue_y >= 0:
@@ -728,6 +821,17 @@ try:
             turn_active = True
             turn_dir = Turn
             box_seen_while_turning = False
+
+            # which line color triggered?
+            if blue_trigger and not orange_trigger:
+                line_label = "blue line found – turning " + Turn.lower()
+            elif orange_trigger and not blue_trigger:
+                line_label = "orange line found – turning " + Turn.lower()
+            else:
+                line_label = "line found – turning " + Turn.lower()
+
+            set_run_state(line_label)
+
 
             # dynamic yaw target (kept for reference)
             y0 = int(0.65 * h_img)
@@ -775,7 +879,28 @@ try:
                 turn_dir = None
                 box_seen_while_turning = False
 
-                # cooldown: no new turn for TURN_COOLDOWN_SEC
+                # ====== TURN / LAP COUNTING ======
+                turn_count += 1
+
+                # turn number within current lap (1–4)
+                turn_in_lap = ((turn_count - 1) % TURNS_PER_LAP) + 1
+                # lap number (1–3)
+                lap_count = (turn_count - 1) // TURNS_PER_LAP + 1
+
+                print(f"[LAP] turn {turn_in_lap} / lap {lap_count}", flush=True)
+
+                # If we have finished ALL laps (3 laps * 4 turns = 12 turns)
+                if turn_count >= TOTAL_TURNS:
+                    print("[LAP] All 3 laps completed. Driving straight for 1s then stopping.", flush=True)
+                    # go straight for 1 second
+                    set_servo_angle(SERVO_CHANNEL, CENTER_ANGLE)
+                    set_motor_speed(MOTOR_FWD, MOTOR_REV, NORMAL_SPEED)
+                    time.sleep(1.0)
+                    # stop completely
+                    set_motor_speed(MOTOR_FWD, MOTOR_REV, STOP_SPEED)
+                    break  # exit the while True loop (will go to finally:)
+
+                # ====== NORMAL COOL-DOWN AFTER TURN (if more laps remain) ======
                 next_turn_allowed_time = time.time() + TURN_COOLDOWN_SEC
                 last_turn_end_time = time.time()
                 settle_until_ts = time.time() + SETTLE_DURATION
@@ -783,8 +908,11 @@ try:
                 if first_turn_gate_active:
                     first_turn_gate_active = False
 
+                set_run_state("cruise")
+
                 # skip the rest of your normal logic this frame
                 continue
+
 
         # ==== BLUE-BACKWARD LOGIC (immediate if intersect) ====
         if not in_blue_backward and not turn_active and not emergency_mode:
@@ -795,6 +923,7 @@ try:
                     blue_backward_start = now_ts
                     target_angle = LEFT_NEAR
                     set_motor_speed(MOTOR_FWD, MOTOR_REV, -BLUE_BACK_SPEED)
+                    set_run_state("red obstacle found – blue-backward escape")
                     # Center while reversing and remember follow direction
                     back_follow_angle = LEFT_NEAR
                     set_servo_angle(SERVO_CHANNEL, CENTER_ANGLE)
@@ -805,6 +934,7 @@ try:
                     blue_backward_start = now_ts
                     target_angle = RIGHT_NEAR
                     set_motor_speed(MOTOR_FWD, MOTOR_REV, -BLUE_BACK_SPEED)
+                    set_run_state("green obstacle found – blue-backward escape")
                     # Center while reversing and remember follow direction
                     back_follow_angle = RIGHT_NEAR
                     set_servo_angle(SERVO_CHANNEL, CENTER_ANGLE)
@@ -829,6 +959,7 @@ try:
                 settle_until_ts = time.time() + SETTLE_DURATION
                 motor_speed = NORMAL_SPEED
                 set_motor_speed(MOTOR_FWD, MOTOR_REV, motor_speed)
+                set_run_state("cruise")
                 # Follow the remembered box direction for a short window
                 if back_follow_angle is not None:
                     set_servo_angle(SERVO_CHANNEL, back_follow_angle)
@@ -855,7 +986,9 @@ try:
                     target_angle = RIGHT_NEAR if avoid_direction == "right" else LEFT_NEAR
                     state = "avoid"
                     state_start = now_ts
+                    set_run_state(f"avoidance – {color.lower()} obstacle")
                     break
+
 
         if avoidance_mode:
             elapsed = time.time() - (avoid_start_time or time.time())
@@ -869,6 +1002,7 @@ try:
                     avoidance_mode = False
                     avoid_direction = None
                     state = "normal"
+                    set_run_state("cruise")
                     with yaw_lock:
                         yaw = 0.0
                     settle_until_ts = time.time() + SETTLE_DURATION
@@ -879,6 +1013,8 @@ try:
             set_motor_speed(MOTOR_FWD, MOTOR_REV, motor_speed)
 
             if len(boxes) == 0:
+                set_run_state("cruise")
+
                 target_angle = imu_center_servo(
                     current_yaw,
                     YAW_DEADBAND_DEG_STRONG ,
@@ -888,12 +1024,14 @@ try:
 
                 l_cm = tof_cm(sensors["left"])
                 r_cm = tof_cm(sensors["right"])
-                l = l_cm
-                r = r_cm
+                #l = l_cm
+                #r = r_cm
+                l = l_ultra
+                r = r_ultra
                 if l < SIDE_COLLIDE_CM and r >= SIDE_COLLIDE_CM:
-                    target_angle = 125
+                    target_angle = LEFT_COLLIDE_ANGLE
                 elif r < SIDE_COLLIDE_CM and l >= SIDE_COLLIDE_CM:
-                    target_angle = 55
+                    target_angle = RIGHT_COLLIDE_ANGLE
 
                 if (l > SIDE_CLEAR_CM and r > SIDE_CLEAR_CM and abs(l - r) < SIDE_BALANCE_CM
                     and abs(raw_gz_dps) < CALM_GZ_THRESH
@@ -920,6 +1058,14 @@ try:
                     last_color = chosen_color
 
                 if frame_count >= COLOR_HOLD_FRAMES:
+                    # lock onto this obstacle color
+                    if chosen_color == "Red":
+                        set_run_state("red obstacle found")
+                    elif chosen_color == "Green":
+                        set_run_state("green obstacle found")
+                    else:
+                        set_run_state(f"{chosen_color.lower()} obstacle found")
+                    
                     # --- AREA-ONLY scaling (far -> less turn, near -> more turn) + IMU yaw term ---
                     area_angle = compute_servo_angle(chosen_color, chosen_area)
 
@@ -927,6 +1073,7 @@ try:
                     norm_area = max(MIN_AREA, min(MAX_AREA, chosen_area))
                     closeness = (norm_area - MIN_AREA) / (MAX_AREA - MIN_AREA + 1e-6)
                     yaw_gain = BOX_YAW_GAIN_MIN + closeness * (BOX_YAW_GAIN_MAX - BOX_YAW_GAIN_MIN)
+                    
 
                     if chosen_color == "Red":
                         target_angle = max(60, min(130, int(area_angle + int(current_yaw * yaw_gain))))
@@ -994,7 +1141,11 @@ finally:
     picam2.stop()
     cv2.destroyAllWindows()
     set_servo_angle(SERVO_CHANNEL, CENTER_ANGLE)
-    set_motor_speed(MOTOR_FWD, MOTOR_REV, 0)
+    set_motor_speed(MOTOR_FWD, MOTOR_REV, STOP_SPEED)
+    # Close ultrasonic sensors
+    front_ultra.close()
+    left_ultra.close()
+    right_ultra.close()
 #red = 13
 #green = 19  
 #blue = 11
