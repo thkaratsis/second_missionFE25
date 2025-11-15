@@ -1,5 +1,5 @@
 # 2nd mission
-# v1.1: add state print, add turn/lap count and stop after 3 laps, variables cleanun
+# v1.1: add state print, add turn/lap count and stop after 3 laps, variables cleanup
 #       add ultrasonic for side checks during cruise
 
 
@@ -28,12 +28,12 @@ Device.pin_factory = LGPIOFactory()
 # =========================
 
 # ---- Speed settings ----
-NORMAL_SPEED          = 14   # Base forward cruising speed during normal driving
-AVOID_SPEED           = 14   # Reverse speed when doing obstacle-avoidance backup
-TURN_MOTOR_SPEED      = 16   # Motor speed while performing a 90° line-based turn
-EMERGENCY_BACK_SPEED  = 18   # Reverse speed in emergency “stuck” escape
-BLUE_BACK_SPEED       = 12   # Reverse speed when box triggers blue-backward escape
-UNPARK_STRAIGHT_SPEED = 19   # Speed used during smart unpark phases
+NORMAL_SPEED          = 11.5   # Base forward cruising speed during normal driving
+AVOID_SPEED           = 13   # Reverse speed when doing obstacle-avoidance backup
+TURN_MOTOR_SPEED      = 13   # Motor speed while performing a 90° line-based turn
+EMERGENCY_BACK_SPEED  = 14   # Reverse speed in emergency “stuck” escape
+BLUE_BACK_SPEED       = 14   # Reverse speed when box triggers blue-backward escape
+UNPARK_STRAIGHT_SPEED = 18   # Speed used during smart unpark phases
 STOP_SPEED            = 0    # Zero-speed (motors off)
 
 # ---- Motor / servo basics ----
@@ -41,10 +41,10 @@ MOTOR_FWD       = 1         # PCA9685 motor channel for forward direction
 MOTOR_REV       = 2         # PCA9685 motor channel for reverse direction
 SERVO_CHANNEL   = 0         # PCA9685 channel used by steering servo
 CENTER_ANGLE    = 90        # Servo angle for going straight
-LEFT_FAR        = 110       # Steering angle for a far red box (mild left)
-LEFT_NEAR       = 125       # Steering angle for a near red box (strong left)
-RIGHT_FAR       = 70        # Steering angle for a far green box (mild right)
-RIGHT_NEAR      = 55        # Steering angle for a near green box (strong right)
+LEFT_FAR        = 105       # Steering angle for a far red box (mild left)
+LEFT_NEAR       = 120       # Steering angle for a near red box (strong left)
+RIGHT_FAR       = 75        # Steering angle for a far green box (mild right)
+RIGHT_NEAR      = 60        # Steering angle for a near green box (strong right)
 new_servo_angle = 90        # Helper variable used in blue-backward servo updates
 LEFT_COLLIDE_ANGLE = 120    # Steering angle on left side collision correctio
 RIGHT_COLLIDE_ANGLE = 60    # Steering angle on right side collision correctio
@@ -52,7 +52,7 @@ RIGHT_COLLIDE_ANGLE = 60    # Steering angle on right side collision correctio
 # ---- Obstacle detection (vision) ----
 MIN_AREA          = 2000    # Minimum contour area to accept as a box
 MAX_AREA          = 20000   # Area at which box is considered "very close"
-COLOR_HOLD_FRAMES = 5       # Frames the same color must persist to be “locked”
+COLOR_HOLD_FRAMES = 3       # Frames the same color must persist to be “locked”
 
 # ---- ToF thresholds (general) ----
 SIDE_COLLIDE_CM       = 30.0  # If side < this, we steer away to avoid collision
@@ -62,7 +62,7 @@ TOF_TURN_FRONT_MAX_CM = 80.0  # Max front distance at which line-turn is valid
 TOF_TURN_LEFT_MIN_CM  = 80.0  # (legacy) min left distance for some turn logic
 
 # ---- Stuck / emergency escape thresholds ----
-FRONT_STUCK_CM    = 7.0    # If front ToF < this and no boxes/line -> emergency reverse
+FRONT_STUCK_CM    = 10.0    # If front ToF < this and no boxes/line -> emergency reverse
 BACK_CLEAR_CM     = 10.0   # Reverse until back ToF >= this
 EMERGENCY_TURN_DEG = 60.0  # Degrees to turn during emergency escape after reversing
 
@@ -89,9 +89,9 @@ LINE_ORIENT_MAX_DEG   = 65    # Maximum angle (deg) to accept a line as “diago
 LINE_MASK_THICKNESS   = 9     # Thickness of mask drawn over detected line band
 
 # ---- Turn-related constants ----
-LINE_CENTER_Y_MIN          = 800  # (legacy) minimal Y for generic line center
-LINE_CENTER_BLUE_Y_MIN     = 900  # Minimal Y for blue line to be valid for turn
-LINE_CENTER_ORANGE_Y_MIN   = 1000  # Minimal Y for orange line to be valid for turn
+LINE_CENTER_Y_MIN          = 500  # (legacy) minimal Y for generic line center
+LINE_CENTER_BLUE_Y_MIN     = 550  # Minimal Y for blue line to be valid for turn
+LINE_CENTER_ORANGE_Y_MIN   = 600  # Minimal Y for orange line to be valid for turn
 TURN_RIGHT_SERVO           = 120  # Servo angle for a hard right line-turn
 TURN_MIN_YAW_DEG           = 75.0 # Min yaw before we allow stopping a turn (if used)
 TURN_FAILSAFE_MAX_DEG      = 80.0 # Failsafe yaw to stop turn even without box
@@ -144,8 +144,8 @@ SOFT_DECAY_RATE   = 0.6   # Softer yaw decay factor used during bias update
 CENTER_LOCK_WINDOW = 4    # Servo must be this close to CENTER for hard decay
 
 # ---- Post-turn grace periods (avoid instant re-trigger) ----
-POST_TURN_GRACE_GREEN_S = 5.00  # Ignore green box triggers for this long after turn
-POST_TURN_GRACE_RED_S   = 0.15  # Ignore red box triggers for this long after turn
+POST_TURN_GRACE_GREEN_S = 0.75  # Ignore green box triggers for this long after turn
+POST_TURN_GRACE_RED_S   = 0.75 # Ignore red box triggers for this long after turn
 
 # ---- IMU keep-straight gains ----
 YAW_KP_BASE             = 1.2  # Base proportional gain for yaw correction
@@ -239,8 +239,8 @@ SERVO_MIN_DELTA_DEG = 2.0
 
 # ---- CAMERA SETUP ----
 picam2 = Picamera2()
-picam2.configure(picam2.create_preview_configuration(main={"size": (1280, 720)})) #(main={"size": (640, 480)}))
-picam2.set_controls({"FrameRate": 60})
+picam2.configure(picam2.create_preview_configuration(main={"size": (800, 480)})) #(main={"size": (640, 480)}))
+picam2.set_controls({"FrameRate": 50})
 picam2.start()
 
 # ---- ToF SETUP ----
@@ -558,7 +558,7 @@ lines_blue = 0
 lines_orange = 0
 
 # ==== LAP & TURN COUNTERS ====
-turn_count = 0   # total turns completed
+turn_count = 1   # total turns completed
 lap_count = 1    # current lap (1-based)
 
 
@@ -699,7 +699,7 @@ try:
             turn_box_seen = True
 
         center_x = img_contours.shape[1] // 2
-        car_width, car_height = 500, 200
+        car_width, car_height = 500, 150
         bottom_y = img_contours.shape[0] - 10
         car_box = (center_x - car_width//2, bottom_y - car_height,
                    center_x + car_width//2, bottom_y)
@@ -895,7 +895,7 @@ try:
                     # go straight for 1 second
                     set_servo_angle(SERVO_CHANNEL, CENTER_ANGLE)
                     set_motor_speed(MOTOR_FWD, MOTOR_REV, NORMAL_SPEED)
-                    time.sleep(1.0)
+                    time.sleep(3.5)
                     # stop completely
                     set_motor_speed(MOTOR_FWD, MOTOR_REV, STOP_SPEED)
                     break  # exit the while True loop (will go to finally:)
