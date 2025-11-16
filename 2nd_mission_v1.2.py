@@ -450,75 +450,99 @@ start_button = Button(20)
 
 print("\n=== SMART UNPARK START ===")
 start_button.wait_for_press()
-print("Button pressed! Starting sequence...")
+print("Button pressed! tarting sequence...")
 time.sleep(1)
 
 left_dist = tof_cm(sensors["left"])
 right_dist = tof_cm(sensors["right"])
 print(f"Left={left_dist:.1f}cm | Right={right_dist:.1f}cm")
 
-if left_dist > right_dist:
-    direction = "left"
-    print("➡ Choosing LEFT (more open).")
-else:
-    direction = "right"
-    print("➡ Choosing RIGHT (more open).")
-
-# Phase 1: ~45°
-with yaw_lock:
-    yaw = 0.0
-last_time = time.time()
-first_angle = UNPARK_LEFT_TURN_ANGLE if direction == "left" else UNPARK_RIGHT_TURN_ANGLE
-set_servo_angle(SERVO_CHANNEL, first_angle)
-set_motor_speed(MOTOR_FWD, MOTOR_REV, UNPARK_STRAIGHT_SPEED)
-while True:
-    now = time.time(); dt = now - last_time; last_time = now
-    Gz = (read_raw_data(GYRO_ZOUT_H)/131.0) - gyro_z_bias
-    with yaw_lock:
-        yaw += Gz * dt; current_yaw = yaw
-    if abs(current_yaw) >= 45.0:
-        break
-
-# Phase 2: ~40°
-with yaw_lock:
-    yaw = 0.0
-last_time = time.time()
-if direction == "left":
-    second_angle = UNPARK_RIGHT_TURN_ANGLE; target_abs_yaw = 40.0
-else:
-    second_angle = UNPARK_LEFT_TURN_ANGLE;  target_abs_yaw = 40.0
-set_servo_angle(SERVO_CHANNEL, second_angle)
-set_motor_speed(MOTOR_FWD, MOTOR_REV, UNPARK_STRAIGHT_SPEED)
-while True:
-    now = time.time(); dt = now - last_time; last_time = now
-    Gz = (read_raw_data(GYRO_ZOUT_H)/131.0) - gyro_z_bias
-    with yaw_lock:
-        yaw += Gz * dt; current_yaw = yaw
-    if abs(current_yaw) >= target_abs_yaw:
-        break
-
-# Extra only for initial "left": ~60° left
-if direction == "left":
+def UnPark_L():
+    # Phase 1: ~45°
     with yaw_lock:
         yaw = 0.0
     last_time = time.time()
-    set_servo_angle(SERVO_CHANNEL, UNPARK_LEFT_TURN_ANGLE)
+    first_angle = UNPARK_LEFT_TURN_ANGLE
+    set_servo_angle(SERVO_CHANNEL, first_angle)
     set_motor_speed(MOTOR_FWD, MOTOR_REV, UNPARK_STRAIGHT_SPEED)
     while True:
         now = time.time(); dt = now - last_time; last_time = now
         Gz = (read_raw_data(GYRO_ZOUT_H)/131.0) - gyro_z_bias
         with yaw_lock:
             yaw += Gz * dt; current_yaw = yaw
-        if abs(current_yaw) >= 60.0:
+        if abs(current_yaw) >= 45.0:
             break
+    
+    # Phase 2: ~40°
+    with yaw_lock:
+        yaw = 0.0
+    last_time = time.time()
+    second_angle = UNPARK_RIGHT_TURN_ANGLE; target_abs_yaw = 40.0
+    set_servo_angle(SERVO_CHANNEL, second_angle)
+    set_motor_speed(MOTOR_FWD, MOTOR_REV, UNPARK_STRAIGHT_SPEED)
+    while True:
+        now = time.time(); dt = now - last_time; last_time = now
+        Gz = (read_raw_data(GYRO_ZOUT_H)/131.0) - gyro_z_bias
+        with yaw_lock:
+            yaw += Gz * dt; current_yaw = yaw
+        if abs(current_yaw) >= target_abs_yaw:
+            break
+    
+    # Straighten & reset yaw
+    set_servo_angle(SERVO_CHANNEL, UNPARK_CENTER_ANGLE)
+    set_motor_speed(MOTOR_FWD, MOTOR_REV, UNPARK_STRAIGHT_SPEED)
+    with yaw_lock:
+        yaw = 0.0
+    print("[DONE] Unpark sequence complete. Entering vision/avoid loop...")
+    set_run_state("cruise")
 
-# Straighten & reset yaw
-set_servo_angle(SERVO_CHANNEL, UNPARK_CENTER_ANGLE)
-set_motor_speed(MOTOR_FWD, MOTOR_REV, UNPARK_STRAIGHT_SPEED)
-with yaw_lock:
-    yaw = 0.0
-print("[DONE] Unpark sequence complete. Entering vision/avoid loop...")
-set_run_state("cruise")
+def UnPark_R():
+        # Phase 1: ~45°
+    with yaw_lock:
+        yaw = 0.0
+    last_time = time.time()
+    first_angle = UNPARK_RIGHT_TURN_ANGLE
+    set_servo_angle(SERVO_CHANNEL, first_angle)
+    set_motor_speed(MOTOR_FWD, MOTOR_REV, UNPARK_STRAIGHT_SPEED)
+    while True:
+        now = time.time(); dt = now - last_time; last_time = now
+        Gz = (read_raw_data(GYRO_ZOUT_H)/131.0) - gyro_z_bias
+        with yaw_lock:
+            yaw += Gz * dt; current_yaw = yaw
+        if abs(current_yaw) >= 45.0:
+            break
+    
+    # Phase 2: ~40°
+    with yaw_lock:
+        yaw = 0.0
+    last_time = time.time()
+    second_angle = UNPARK_LEFT_TURN_ANGLE;  target_abs_yaw = 40.0
+    set_servo_angle(SERVO_CHANNEL, second_angle)
+    set_motor_speed(MOTOR_FWD, MOTOR_REV, UNPARK_STRAIGHT_SPEED)
+    while True:
+        now = time.time(); dt = now - last_time; last_time = now
+        Gz = (read_raw_data(GYRO_ZOUT_H)/131.0) - gyro_z_bias
+        with yaw_lock:
+            yaw += Gz * dt; current_yaw = yaw
+        if abs(current_yaw) >= target_abs_yaw:
+            break
+    
+    # Straighten & reset yaw
+    set_servo_angle(SERVO_CHANNEL, UNPARK_CENTER_ANGLE)
+    set_motor_speed(MOTOR_FWD, MOTOR_REV, UNPARK_STRAIGHT_SPEED)
+    with yaw_lock:
+        yaw = 0.0
+    print("[DONE] Unpark sequence complete. Entering vision/avoid loop...")
+    set_run_state("cruise")
+
+if left_dist > right_dist:
+    direction = "left"
+    UnPark_L()
+    print("➡ Choosing LEFT (more open).")
+else:
+    direction = "right"
+    UnPark_R()
+    print("➡ Choosing RIGHT (more open).")
 
 # ==== STATE VARIABLES ====
 last_color = None
