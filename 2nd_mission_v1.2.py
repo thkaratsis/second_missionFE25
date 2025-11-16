@@ -1,6 +1,7 @@
 # 2nd mission
 # v1.1: add state print, add turn/lap count and stop after 3 laps, variables cleanup
 #       add ultrasonic for side checks during cruise
+# v1.2: add backwards drive after turning
 
 
 
@@ -1148,6 +1149,7 @@ finally:
     front_ultra.close()
     left_ultra.close()
     right_ultra.close()
+    
 #red = 13
 #green = 19  
 #blue = 11
